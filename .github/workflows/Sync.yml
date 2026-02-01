@@ -1,15 +1,15 @@
 name: Sync luci-app-openclash and luci-app-passwall
 
 on:
-  schedule:
-    - cron: "0 16 * * *"   # 北京时间 0 点（UTC）
-  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 0 * * *"   # 每天 0 点运行
+  workflow_dispatch:       # 允许手动触发
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
+
       # 1. 检出当前仓库
       - name: Checkout current repo
         uses: actions/checkout@v4
@@ -17,48 +17,55 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 配置 Git
+      # 2. 配置 Git 用户信息
       - name: Configure Git
         run: |
           git config --global user.name "hatbhtbh"
           git config --global user.email "hatbhtbh@gmail.com"
 
-      # 3. 检出 OpenClash 上游仓库
-      - name: Checkout OpenClash upstream
+      # 3. 检出 OpenClash 子目录
+      - name: Checkout OpenClash luci-app-openclash
         uses: actions/checkout@v4
         with:
           repository: vernesong/OpenClash
           ref: master
           path: upstream-openclash
-          fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            luci-app-openclash
 
-      # 4. 检出 Passwall 上游仓库（改成 Openwrt-Passwall/openwrt-passwall）
-      - name: Checkout Passwall upstream
+      # 4. 检出 Passwall 子目录
+      - name: Checkout Passwall luci-app-passwall
         uses: actions/checkout@v4
         with:
           repository: Openwrt-Passwall/openwrt-passwall
           ref: main
           path: upstream-passwall
-          fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            luci-app-passwall
 
-      # 5. 复制目录
+      # 5. 复制目录到 applications
       - name: Copy target directories
         run: |
-          rm -rf luci-app-openclash luci-app-passwall
-          cp -r upstream-openclash/luci-app-openclash ./luci-app-openclash
-          cp -r upstream-passwall/luci-app-passwall ./luci-app-passwall
+          echo "Copying directories to applications..."
+          rm -rf applications/luci-app-openclash applications/luci-app-passwall
+          cp -r upstream-openclash/luci-app-openclash applications/luci-app-openclash
+          cp -r upstream-passwall/luci-app-passwall applications/luci-app-passwall
+          echo "Directories copied successfully."
 
-      # 6. 提交并推送
-      - name: Commit and Push
+      # 6. 提交并推送更改（安全版）
+      - name: Commit and Push changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git add luci-app-openclash luci-app-passwall
+          echo "Checking for changes..."
+          git add applications/luci-app-openclash applications/luci-app-passwall
           if git diff --cached --quiet; then
-            echo "No changes detected, skip commit"
-            exit 0
+            echo "No changes detected. Nothing to commit."
+          else
+            echo "Changes detected. Committing and pushing..."
+            git commit -m "Sync luci-app-openclash and luci-app-passwall from upstream"
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:master
+            echo "Commit and push completed."
           fi
-          git commit -m "Sync luci-app-openclash and luci-app-passwall from upstream"
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:${{ github.ref_name }}
