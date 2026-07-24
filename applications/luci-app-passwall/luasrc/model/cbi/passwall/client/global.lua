@@ -8,6 +8,8 @@ local has_gfwlist = fs.access("/usr/share/passwall/rules/gfwlist")
 local has_chnlist = fs.access("/usr/share/passwall/rules/chnlist")
 local has_chnroute = fs.access("/usr/share/passwall/rules/chnroute")
 
+api.set_default_cbi()
+
 m = Map(appname)
 api.set_apply_on_parse(m)
 
@@ -95,7 +97,7 @@ end
 
 m:append(Template(appname .. "/global/status"))
 
-global_cfgid = m:get("@global[0]")[".name"]
+global_cfgid = (m:get("@global[0]") or {})[".name"] or ""
 
 s = m:section(TypedSection, "global")
 s.anonymous = true
@@ -253,7 +255,7 @@ o:value("119.28.28.28")
 o:depends("direct_dns_mode", "udp")
 o:depends("direct_dns_mode", "tcp")
 
-o = s:taboption("DNS", Flag, "filter_proxy_ipv6", translate("Filter Proxy Host IPv6"), translate("Experimental feature."))
+o = s:taboption("DNS", Flag, "filter_proxy_ipv6", translate("Filter Proxy Host IPv6"))
 o.default = "0"
 
 -- TCP分流时dns过滤模式保存逻辑
@@ -305,6 +307,12 @@ if has_xray then
 end
 o:depends({ dns_shunt = "chinadns-ng", _node_sel_other = "1" })
 o:depends({ dns_shunt = "dnsmasq", _node_sel_other = "1" })
+o.write = function(self, section, value)
+	if value ~= "sing-box" and value ~= "xray" then
+		m:del(section, "v2ray_dns_mode")
+	end
+	return ListValue.write(self, section, value)
+end
 o.remove = function(self, section)
 	local f = s.fields["smartdns_dns_mode"]
 	if f and f:formvalue(section) then
@@ -324,6 +332,12 @@ if api.is_finded("smartdns") then
 		o:value("xray", "Xray")
 	end
 	o:depends({ dns_shunt = "smartdns", _node_sel_other = "1" })
+	o.write = function(self, section, value)
+		if value == "socks" then
+			m:del(section, "v2ray_dns_mode")
+		end
+		return ListValue.write(self, section, value)
+	end
 	o.remove = function(self, section)
 		local f = s.fields["dns_mode"]
 		if f and f:formvalue(section) then
@@ -639,14 +653,6 @@ o:value("info")
 o:value("warning")
 o:value("error")
 
-o = s:taboption("log", ListValue, "trojan_loglevel", "Trojan " ..  translate("Log Level"))
-o.default = "2"
-o:value("0", "all")
-o:value("1", "info")
-o:value("2", "warn")
-o:value("3", "error")
-o:value("4", "fatal")
-
 o = s:taboption("log", Flag, "advanced_log_feature", translate("Advanced log feature"), translate("For professionals only."))
 o.default = "0"
 o = s:taboption("log", Flag, "sys_log", translate("Logging to system log"), translate("Logging to the system log for more advanced functions. For example, send logs to a dedicated log server."))
@@ -835,4 +841,4 @@ footer.global_cfgid = global_cfgid
 footer.shunt_list = api.jsonc.stringify(shunt_list)
 m:append(footer)
 
-return m
+return api.return_map(m)

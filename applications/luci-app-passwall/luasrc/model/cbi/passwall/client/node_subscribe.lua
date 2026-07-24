@@ -1,9 +1,7 @@
 local api = require "luci.passwall.api"
 local uci = api.uci
 local appname = "passwall"
-local has_ss = api.is_finded("ss-redir")
 local has_ss_rust = api.is_finded("sslocal")
-local has_trojan_plus = api.is_finded("trojan-plus")
 local has_singbox = api.finded_com("sing-box")
 local has_xray = api.finded_com("xray")
 local has_hysteria2 = api.finded_com("hysteria")
@@ -13,17 +11,9 @@ local vmess_type = {}
 local vless_type = {}
 local hysteria2_type = {}
 local xray_version = api.get_app_version("xray")
-if has_ss then
-	local s = "shadowsocks-libev"
-	table.insert(ss_type, s)
-end
 if has_ss_rust then
 	local s = "shadowsocks-rust"
 	table.insert(ss_type, s)
-end
-if has_trojan_plus then
-	local s = "trojan-plus"
-	table.insert(trojan_type, s)
 end
 if has_singbox then
 	local s = "sing-box"
@@ -47,6 +37,8 @@ if has_hysteria2 then
 	local s = "hysteria2"
 	table.insert(hysteria2_type, s)
 end
+
+api.set_default_cbi()
 
 m = Map(appname)
 api.set_apply_on_parse(m)
@@ -137,7 +129,8 @@ o.cfgvalue = function(self, section)
 	 translate("Manual subscription All"))
 end
 
-s = m:section(TypedSection, "subscribe_list", "", "<font color='red'>" .. translate("When adding a new subscription, please save and apply before manually subscribing. If you only change the subscription URL, you can subscribe manually, and the system will save it automatically.") .. "</font>")
+local cfgname = "subscribe_list"
+s = m:section(TypedSection, cfgname, "", "<font color='red'>" .. translate("When adding a new subscription, please save and apply before manually subscribing. If you only change the subscription URL, you can subscribe manually, and the system will save it automatically.") .. "</font>")
 s.addremove = true
 s.anonymous = true
 s.sortable = true
@@ -158,7 +151,7 @@ o.validate = function(self, value, section)
 		return nil, translate("Remark cannot be empty.")
 	end
 	local duplicate = false
-	m.uci:foreach(appname, "subscribe_list", function(e)
+	m.uci:foreach(appname, cfgname, function(e)
 		if e[".name"] ~= section and e["remark"] and e["remark"]:lower() == value:lower() then
 			duplicate = true
 			return false
@@ -233,6 +226,11 @@ o.cfgvalue = function(self, section)
 	section, translate("Manual subscription"))
 end
 
+local sortable = Template(appname .. "/cbi/sortable")
+sortable.api = api
+sortable.target_cfgname = cfgname
+m:append(sortable)
+
 m:append(Template(appname .. "/node_subscribe/js"))
 
-return m
+return api.return_map(m)

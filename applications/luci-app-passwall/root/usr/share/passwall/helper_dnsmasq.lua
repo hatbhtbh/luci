@@ -163,7 +163,6 @@ function add_rule(var)
 	local DEFAULT_DNS = var["-DEFAULT_DNS"]
 	local LOCAL_DNS = var["-LOCAL_DNS"]
 	local TUN_DNS = var["-TUN_DNS"]
-	local REMOTE_FAKEDNS = var["-REMOTE_FAKEDNS"]
 	local USE_DEFAULT_DNS = var["-USE_DEFAULT_DNS"]
 	local CHINADNS_DNS = var["-CHINADNS_DNS"]
 	local TCP_NODE = var["-TCP_NODE"]
@@ -182,10 +181,6 @@ function add_rule(var)
 	local CACHE_TEXT_FILE = CACHE_DNS_PATH .. ".txt"
 	local USE_CHINADNS_NG = "0"
 	local IS_SHUNT_NODE = uci:get(appname, TCP_NODE, "protocol") == "_shunt"
-
-	if IS_SHUNT_NODE then
-		REMOTE_FAKEDNS = uci:get(appname, TCP_NODE, "fakedns") or "0"
-	end
 
 	local list1 = {}
 	local excluded_domain = {}
@@ -309,7 +304,7 @@ function add_rule(var)
 	local cache_text = ""
 	local nodes_address_md5 = sys.exec("echo -n $(uci show passwall | grep '\\.address') | md5sum")
 	local new_rules = sys.exec("echo -n $(find /usr/share/passwall/rules -type f | xargs md5sum)")
-	local new_text = TMP_DNSMASQ_PATH .. DNSMASQ_CONF_FILE .. DEFAULT_DNS .. LOCAL_DNS .. TUN_DNS .. REMOTE_FAKEDNS .. USE_DEFAULT_DNS .. CHINADNS_DNS .. USE_DIRECT_LIST .. USE_PROXY_LIST .. USE_BLOCK_LIST .. USE_GFW_LIST .. CHN_LIST .. DEFAULT_PROXY_MODE .. NO_PROXY_IPV6 .. nodes_address_md5 .. new_rules .. NFTFLAG
+	local new_text = TMP_DNSMASQ_PATH .. DNSMASQ_CONF_FILE .. DEFAULT_DNS .. LOCAL_DNS .. TUN_DNS .. USE_DEFAULT_DNS .. CHINADNS_DNS .. USE_DIRECT_LIST .. USE_PROXY_LIST .. USE_BLOCK_LIST .. USE_GFW_LIST .. CHN_LIST .. DEFAULT_PROXY_MODE .. NO_PROXY_IPV6 .. nodes_address_md5 .. new_rules .. NFTFLAG
 	if fs.access(CACHE_TEXT_FILE) then
 		for line in io.lines(CACHE_TEXT_FILE) do
 			cache_text = line
@@ -372,8 +367,8 @@ function add_rule(var)
 				fwd_dns = nil
 			else
 				local sets = {
-					setflag_4 .. "passwall_vps",
-					setflag_6 .. "passwall_vps6"
+					setflag_4 .. "psw_vps",
+					setflag_6 .. "psw_vps6"
 				}
 				local function process_address(address)
 					address = (address or ""):lower()
@@ -406,8 +401,8 @@ function add_rule(var)
 				end
 				if fwd_dns then
 					local sets = {
-						setflag_4 .. "passwall_white",
-						setflag_6 .. "passwall_white6"
+						setflag_4 .. "psw_white",
+						setflag_6 .. "psw_white6"
 					}
 					--始终用国内DNS解析直连（白名单）列表
 					for line in io.lines("/usr/share/passwall/rules/direct_host") do
@@ -431,20 +426,17 @@ function add_rule(var)
 					fwd_dns = nil
 				end
 				if fwd_dns then
-					local set_name = "passwall_black"
-					local set6_name = "passwall_black6"
+					local set_name = "psw_black"
+					local set6_name = "psw_black6"
 					if FLAG ~= "default" then
-						set_name = "passwall_" .. FLAG .. "_black"
-						set6_name = "passwall_" .. FLAG .. "_black6"
+						set_name = "psw_" .. FLAG .. "_black"
+						set6_name = "psw_" .. FLAG .. "_black6"
 					end
 					local sets = {
 						setflag_4 .. set_name
 					}
 					if NO_PROXY_IPV6 ~= "1" then
 						table.insert(sets, setflag_6 .. set6_name)
-					end
-					if REMOTE_FAKEDNS == "1" then
-						sets = {}
 					end
 					--始终使用远程DNS解析代理（黑名单）列表
 					for line in io.lines("/usr/share/passwall/rules/proxy_host") do
@@ -471,20 +463,17 @@ function add_rule(var)
 					fwd_dns = nil
 				end
 				if fwd_dns then
-					local set_name = "passwall_gfw"
-					local set6_name = "passwall_gfw6"
+					local set_name = "psw_gfw"
+					local set6_name = "psw_gfw6"
 					if FLAG ~= "default" then
-						set_name = "passwall_" .. FLAG .. "_gfw"
-						set6_name = "passwall_" .. FLAG .. "_gfw6"
+						set_name = "psw_" .. FLAG .. "_gfw"
+						set6_name = "psw_" .. FLAG .. "_gfw6"
 					end
 					local sets = {
 						setflag_4 .. set_name
 					}
 					if NO_PROXY_IPV6 ~= "1" then
 						table.insert(sets, setflag_6 .. set6_name)
-					end
-					if REMOTE_FAKEDNS == "1" then
-						sets = {}
 					end
 					for line in io.lines("/usr/share/passwall/rules/gfwlist") do
 						if line ~= "" and not line:find("#") and not check_excluded_domain(line) then
@@ -519,17 +508,14 @@ function add_rule(var)
 				end
 				if fwd_dns then
 					local sets = {
-						setflag_4 .. "passwall_chn",
-						setflag_6 .. "passwall_chn6"
+						setflag_4 .. "psw_chn",
+						setflag_6 .. "psw_chn6"
 					}
 					if CHN_LIST == "proxy" then
 						if NO_PROXY_IPV6 == "1" then
 							sets = {
-								setflag_4 .. "passwall_chn"
+								setflag_4 .. "psw_chn"
 							}
-						end
-						if REMOTE_FAKEDNS == "1" then
-							sets = {}
 						end
 					end
 					for line in io.lines("/usr/share/passwall/rules/chnlist") do
@@ -569,24 +555,24 @@ function add_rule(var)
 					if _node_id == "_direct" then
 						fwd_dns = LOCAL_DNS
 						if USE_DIRECT_LIST == "1" then
-							table.insert(sets, setflag_4 .. "passwall_white")
-							table.insert(sets, setflag_6 .. "passwall_white6")
+							table.insert(sets, setflag_4 .. "psw_white")
+							table.insert(sets, setflag_6 .. "psw_white6")
 						else
-							local set_name = "passwall_shunt"
-							local set6_name = "passwall_shunt6"
+							local set_name = "psw_shunt"
+							local set6_name = "psw_shunt6"
 							if FLAG ~= "default" then
-								set_name = "passwall_" .. FLAG .. "_shunt"
-								set6_name = "passwall_" .. FLAG .. "_shunt6"
+								set_name = "psw_" .. FLAG .. "_shunt"
+								set6_name = "psw_" .. FLAG .. "_shunt6"
 							end
 							table.insert(sets, setflag_4 .. set_name)
 							table.insert(sets, setflag_6 .. set6_name)
 						end
 					else
-						local set_name = "passwall_shunt"
-						local set6_name = "passwall_shunt6"
+						local set_name = "psw_shunt"
+						local set6_name = "psw_shunt6"
 						if FLAG ~= "default" then
-							set_name = "passwall_" .. FLAG .. "_shunt"
-							set6_name = "passwall_" .. FLAG .. "_shunt6"
+							set_name = "psw_" .. FLAG .. "_shunt"
+							set6_name = "psw_" .. FLAG .. "_shunt6"
 						end
 						fwd_dns = TUN_DNS
 						table.insert(sets, setflag_4 .. set_name)
@@ -594,11 +580,6 @@ function add_rule(var)
 							table.insert(sets, setflag_6 .. set6_name)
 						else
 							no_ipv6 = true
-						end
-						if not only_global then
-							if REMOTE_FAKEDNS == "1" then
-								sets = {}
-							end
 						end
 					end
 
