@@ -13,7 +13,8 @@ local app_version = require "luci.model.cbi.kodexplorer.api".get_version()
 			</div>
 		</div>
 	</div>
-<% else %>
+<% end %>
+
 	<div class="cbi-value">
 		<label class="cbi-value-title">
 			<%:Manually update%>
@@ -30,7 +31,6 @@ local app_version = require "luci.model.cbi.kodexplorer.api".get_version()
 			</div>
 		</div>
 	</div>
-<% end %>
 
 <script type="text/javascript">
 	//<![CDATA[
@@ -97,7 +97,7 @@ local app_version = require "luci.model.cbi.kodexplorer.api".get_version()
 
 		var ckeckDetailElm = document.getElementById('download-detail');
 
-		doAjaxGet('<%=url([[admin]], [[nas]], [[kodexplorer]], [[check]])%>', {
+		doAjaxGet('<%=url([[admin]], [[services]], [[kodexplorer]], [[check]])%>', {
 			token: tokenStr
 		}, function (json) {
 			removePageNotice();
@@ -111,7 +111,7 @@ local app_version = require "luci.model.cbi.kodexplorer.api".get_version()
 					var urlNode = '';
 					if (server.version) {
 						urlNode = '<em style="color:red;">' + latestVersionText + server.version + '</em>';
-						var html_url = 'https://kodcloud.com/download/';
+						var html_url = 'https://github.com/kalcaddle/kodbox/releases';
 						if (html_url) {
 							urlNode = '<a href="' + html_url + '" target="_blank">' + urlNode + '</a>';
 						}
@@ -134,7 +134,7 @@ local app_version = require "luci.model.cbi.kodexplorer.api".get_version()
 
 		addPageNotice();
 
-		var UpdateUrl = '<%=url([[admin]], [[nas]], [[kodexplorer]], [[download]])%>';
+		var UpdateUrl = '<%=url([[admin]], [[services]], [[kodexplorer]], [[download]])%>';
 		// Download file
 		doAjaxGet(UpdateUrl, {
 			token: tokenStr,

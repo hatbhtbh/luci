@@ -7,10 +7,12 @@ local i18n = require "luci.i18n"
 module("luci.model.cbi.kodexplorer.api", package.seeall)
 
 local appname = "kodexplorer"
-local api_url = "https://api.kodcloud.com/?app/version"
+local raw_version_url = "https://raw.githubusercontent.com/kalcaddle/kodbox/main/config/version.php"
+local github_api_url = "https://api.github.com/repos/kalcaddle/kodbox/releases/latest"
+local main_zip_url = "https://codeload.github.com/kalcaddle/kodbox/zip/refs/heads/main"
 
 local wget = "/usr/bin/wget"
-local wget_args = { "--no-check-certificate", "--quiet", "--timeout=10", "--tries=2" }
+local wget_args = { "--no-check-certificate", "--quiet", "--timeout=30" }
 local command_timeout = 300
 
 local function _unpack(t, i)
@@ -69,55 +71,44 @@ end
 
 function get_version()
     local version = get_project_directory() .. "/config/version.php"
-    return sys.exec(string.format("echo -n $(cat %s 2>/dev/null | grep \"'KOD_VERSION'\" | cut -d \"'\" -f 4)", version))
+    return util.trim(sys.exec("grep \"'KOD_VERSION'\" " .. version .. " 2>/dev/null | head -n 1 | cut -d \"'\" -f 4"))
 end
 
-local function compare_versions(ver1, comp, ver2)
-    local table = table
-
-    local av1 = util.split(ver1, "[%.%-]", nil, true)
-    local av2 = util.split(ver2, "[%.%-]", nil, true)
-
-    local max = table.getn(av1)
-    local n2 = table.getn(av2)
-    if (max < n2) then max = n2 end
-
-    for i = 1, max, 1 do
-        local s1 = av1[i] or ""
-        local s2 = av2[i] or ""
-
-        if comp == "~=" and (s1 ~= s2) then return true end
-        if (comp == "<" or comp == "<=") and (s1 < s2) then return true end
-        if (comp == ">" or comp == ">=") and (s1 > s2) then return true end
-        if (s1 ~= s2) then return false end
+local function get_remote_version()
+    local ver = util.trim(sys.exec(wget .. " --no-check-certificate --timeout=10 -qO- " .. raw_version_url .. " 2>/dev/null | grep \"'KOD_VERSION'\" | head -n 1 | cut -d \"'\" -f 4"))
+    if ver and ver ~= "" then
+        return ver, main_zip_url
     end
 
-    return not (comp == "<" or comp == ">")
-end
-
-local function get_api_json(url)
     local jsonc = require "luci.jsonc"
+    local json_content = sys.exec(wget .. " --no-check-certificate --timeout=10 -U 'Mozilla/5.0' -qO- " .. github_api_url .. " 2>/dev/null")
+    if json_content and json_content ~= "" then
+        local json = jsonc.parse(json_content)
+        if json and json.tag_name then
+            return json.tag_name, "https://codeload.github.com/kalcaddle/kodbox/zip/refs/tags/" .. json.tag_name
+        end
+    end
 
-    local output = {}
-    -- exec(wget, { "-O-", url, _unpack(wget_args) },
-    --	function(chunk) output[#output + 1] = chunk end)
-    -- local json_content = util.trim(table.concat(output))
-
-    local json_content = sys.exec(wget .. " --no-check-certificate --timeout=10 -t 1 -O- " .. url)
-
-    if json_content == "" then return {} end
-
-    return jsonc.parse(json_content) or {}
+    return "Latest(main)", main_zip_url
 end
 
 function to_check()
-    local json = get_api_json(api_url)
-    return json
+    local latest_ver, download_link = get_remote_version()
+
+    return {
+        code = true,
+        data = {
+            server = {
+                version = latest_ver,
+                link = download_link
+            }
+        }
+    }
 end
 
 function to_download(url)
-    if not url or url == "" then
-        return {code = 1, error = i18n.translate("Download url is required.")}
+    if not url or url == "" or string.find(url, "kodcloud.com") then
+        url = main_zip_url
     end
 
     sys.call("/bin/rm -f /tmp/kodcloud_download.*")
@@ -163,7 +154,8 @@ function to_move(file)
 
     local client_file = get_project_directory()
     sys.call("mkdir -p " .. client_file)
-    sys.call("cp -R " .. file .. "/* " .. client_file)
+    sys.call("if [ -d " .. file .. "/kodbox-* ]; then cp -Rf " .. file .. "/kodbox-*/* " .. client_file .. "/; else cp -Rf " .. file .. "/* " .. client_file .. "/; fi")
+    sys.call("chmod -R 777 " .. client_file)
     sys.call("/bin/rm -rf /tmp/kodcloud_extract.*")
 
     return {code = 0}
