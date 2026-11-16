@@ -7,10 +7,10 @@ local i18n = require "luci.i18n"
 module("luci.model.cbi.kodexplorer.api", package.seeall)
 
 local appname = "kodexplorer"
-local api_url = "https://api.kodcloud.com/?app/version"
+local api_url = "https://api.github.com/repos/kalcaddle/kodbox/releases/latest"
 
 local wget = "/usr/bin/wget"
-local wget_args = { "--no-check-certificate", "--quiet", "--timeout=10", "--tries=2" }
+local wget_args = { "--no-check-certificate", "-q", "-T", "30" }
 local command_timeout = 300
 
 local function _unpack(t, i)
@@ -72,47 +72,45 @@ function get_version()
     return sys.exec(string.format("echo -n $(cat %s 2>/dev/null | grep \"'KOD_VERSION'\" | cut -d \"'\" -f 4)", version))
 end
 
-local function compare_versions(ver1, comp, ver2)
-    local table = table
-
-    local av1 = util.split(ver1, "[%.%-]", nil, true)
-    local av2 = util.split(ver2, "[%.%-]", nil, true)
-
-    local max = table.getn(av1)
-    local n2 = table.getn(av2)
-    if (max < n2) then max = n2 end
-
-    for i = 1, max, 1 do
-        local s1 = av1[i] or ""
-        local s2 = av2[i] or ""
-
-        if comp == "~=" and (s1 ~= s2) then return true end
-        if (comp == "<" or comp == "<=") and (s1 < s2) then return true end
-        if (comp == ">" or comp == ">=") and (s1 > s2) then return true end
-        if (s1 ~= s2) then return false end
-    end
-
-    return not (comp == "<" or comp == ">")
-end
-
 local function get_api_json(url)
     local jsonc = require "luci.jsonc"
-
-    local output = {}
-    -- exec(wget, { "-O-", url, _unpack(wget_args) },
-    --	function(chunk) output[#output + 1] = chunk end)
-    -- local json_content = util.trim(table.concat(output))
-
-    local json_content = sys.exec(wget .. " --no-check-certificate --timeout=10 -t 1 -O- " .. url)
-
+    local json_content = sys.exec("curl -sL -k -A 'Mozilla/5.0' --connect-timeout 15 -m 30 '" .. url .. "' 2>/dev/null || " .. wget .. " --no-check-certificate -U 'Mozilla/5.0' -q -T 30 -O- '" .. url .. "' 2>/dev/null")
     if json_content == "" then return {} end
-
     return jsonc.parse(json_content) or {}
 end
 
 function to_check()
-    local json = get_api_json(api_url)
-    return json
+    local raw = get_api_json(api_url)
+    if not raw or not raw.tag_name then
+        return { code = 0 }
+    end
+
+    local ver = raw.tag_name:gsub("^v", "")
+        ver = ver:match("^(%d+%.%d+)") or ver
+    local dl_url = ""
+
+    if raw.assets and #raw.assets > 0 then
+        for _, asset in ipairs(raw.assets) do
+            if asset.name and asset.name:match("%.zip$") then
+                dl_url = asset.browser_download_url
+                break
+            end
+        end
+    end
+
+    if dl_url == "" then
+        dl_url = "https://github.com/kalcaddle/kodbox/archive/refs/tags/" .. raw.tag_name .. ".zip"
+    end
+
+    return {
+        code = 1,
+        data = {
+            server = {
+                version = ver,
+                link = dl_url
+            }
+        }
+    }
 end
 
 function to_download(url)
@@ -120,13 +118,15 @@ function to_download(url)
         return {code = 1, error = i18n.translate("Download url is required.")}
     end
 
-    sys.call("/bin/rm -f /tmp/kodcloud_download.*")
+    local proj_dir = get_project_directory()
+    sys.call("mkdir -p " .. proj_dir)
+    sys.call("/bin/rm -f " .. proj_dir .. "/kodcloud_download.*")
 
-    local tmp_file = util.trim(util.exec("mktemp -u -t kodcloud_download.XXXXXX"))
+    local tmp_file = util.trim(util.exec("mktemp -u -p " .. proj_dir .. " kodcloud_download.XXXXXX"))
 
-    local result = exec(wget, {"-O", tmp_file, url, _unpack(wget_args)}, nil, command_timeout) == 0
+    local result = (sys.call(string.format("curl -sL -k -A 'Mozilla/5.0' --connect-timeout 15 -m 300 -o '%s' '%s' || %s --no-check-certificate -U 'Mozilla/5.0' -q -T 300 -O '%s' '%s'", tmp_file, url, wget, tmp_file, url)) == 0)
 
-    if not result then
+    if not result or not fs.access(tmp_file) or (fs.stat(tmp_file, "size") or 0) < 1024 then
         exec("/bin/rm", {"-f", tmp_file})
         return {
             code = 1,
@@ -142,13 +142,13 @@ function to_extract(file)
         return {code = 1, error = i18n.translate("File path required.")}
     end
 
-    sys.call("/bin/rm -rf /tmp/kodcloud_extract.*")
-    local tmp_dir = util.trim(util.exec("mktemp -d -t kodcloud_extract.XXXXXX"))
+    local proj_dir = get_project_directory()
+    sys.call("mkdir -p " .. proj_dir)
+    sys.call("/bin/rm -rf " .. proj_dir .. "/kodcloud_extract.*")
+    local tmp_dir = util.trim(util.exec("mktemp -d -p " .. proj_dir .. " kodcloud_extract.XXXXXX"))
 
     local output = {}
     exec("/usr/bin/unzip", {"-o", file, "-d", tmp_dir}, function(chunk) output[#output + 1] = chunk end)
-
-    local files = util.split(table.concat(output))
 
     exec("/bin/rm", {"-f", file})
 
@@ -157,14 +157,25 @@ end
 
 function to_move(file)
     if not file or file == "" or not fs.access(file) then
-        sys.call("/bin/rm -rf /tmp/kodcloud_extract.*")
+        sys.call("/bin/rm -rf " .. get_project_directory() .. "/kodcloud_extract.*")
         return {code = 1, error = i18n.translate("Client file is required.")}
     end
 
     local client_file = get_project_directory()
     sys.call("mkdir -p " .. client_file)
-    sys.call("cp -R " .. file .. "/* " .. client_file)
-    sys.call("/bin/rm -rf /tmp/kodcloud_extract.*")
+
+    local sub_dir = util.trim(util.exec("find " .. file .. " -mindepth 1 -maxdepth 1 -type d"))
+    if sub_dir ~= "" and not fs.access(file .. "/index.php") and fs.access(sub_dir .. "/index.php") then
+        sys.call("cp -Rf " .. sub_dir .. "/* " .. client_file .. "/")
+    else
+        sys.call("cp -Rf " .. file .. "/* " .. client_file .. "/")
+    end
+
+    sys.call("chmod -Rf 777 " .. client_file)
+    sys.call("/bin/rm -rf " .. get_project_directory() .. "/kodcloud_extract.*")
+
+        sys.call("chmod +x /etc/init.d/kodexplorer && /etc/init.d/kodexplorer enable >/dev/null 2>&1")
+    sys.call("/etc/init.d/kodexplorer restart >/dev/null 2>&1 &")
 
     return {code = 0}
 end
