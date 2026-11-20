@@ -1,6 +1,4 @@
-require "luci.sys"
 local api = require "luci.passwall.api"
-local appname = "passwall"
 
 local var = api.get_args(arg)
 local FLAG = var["-FLAG"]
@@ -12,8 +10,7 @@ local USE_DEFAULT_DNS = var["-USE_DEFAULT_DNS"]
 local REMOTE_DNS = var["-REMOTE_DNS"]
 local TUN_DNS = var["-TUN_DNS"]
 local DNS_MODE = var["-DNS_MODE"]
-local REMOTE_FAKEDNS = var["-REMOTE_FAKEDNS"]
-local TCP_NODE = var["-TCP_NODE"]
+local NODE = var["-NODE"]
 local USE_DIRECT_LIST = var["-USE_DIRECT_LIST"]
 local USE_PROXY_LIST = var["-USE_PROXY_LIST"]
 local USE_BLOCK_LIST = var["-USE_BLOCK_LIST"]
@@ -23,20 +20,27 @@ local DEFAULT_PROXY_MODE = var["-DEFAULT_PROXY_MODE"]
 local NO_PROXY_IPV6 = var["-NO_PROXY_IPV6"]
 local NO_LOGIC_LOG = var["-NO_LOGIC_LOG"]
 local NFTFLAG = var["-NFTFLAG"]
+local SUBNET = var["-SUBNET"]
+local LISTEN_PORT = var["-LISTEN_PORT"]
+local LOCAL_PORT = var["-LOCAL_PORT"]
 
-local uci = api.uci
 local sys = api.sys
 local fs = api.fs
 local datatypes = api.datatypes
 
-local TMP_PATH = "/tmp/etc/" .. appname
+local TMP_PATH = api.TMP_PATH
 local TMP_ACL_PATH = TMP_PATH .. "/acl"
-local RULES_PATH = "/usr/share/" .. appname .. "/rules"
+local RULES_PATH = "/usr/share/passwall/rules"
 local FLAG_PATH = TMP_ACL_PATH .. "/" .. FLAG
 local TMP_CONF_FILE = FLAG_PATH .. "/smartdns.conf"
 local config_lines = {}
 local tmp_lines = {}
-local USE_GEOVIEW = uci:get(appname, "@global_rules[0]", "enable_geoview")
+local USE_GEOVIEW = api.uci_get_c("@global_rules[0]", "enable_geoview")
+local IS_SHUNT_NODE = api.uci_get_c(NODE, "protocol") == "_shunt"
+
+if not api.is_finded("geoview") then
+	USE_GEOVIEW = "0"
+end
 
 local function log(...)
 	if NO_LOGIC_LOG == "1" then
@@ -92,12 +96,17 @@ local function insert_array_after(array1, array2, target) --将array2插入到ar
 end
 
 local function get_geosite(list_arg, out_path)
-	local geosite_path = uci:get(appname, "@global_rules[0]", "v2ray_location_asset")
+	local geosite_path = api.uci_get_c("@global_rules[0]", "v2ray_location_asset") or "/usr/share/v2ray/"
 	geosite_path = geosite_path:match("^(.*)/") .. "/geosite.dat"
-	if not is_file_nonzero(geosite_path) then return end
-	if api.is_finded("geoview") and list_arg and out_path then
-		sys.exec("geoview -type geosite -append=true -input " .. geosite_path .. " -list '" .. list_arg .. "' -output " .. out_path)
+	if not is_file_nonzero(geosite_path) then return 1 end
+	local bin = api.finded_com("geoview")
+	if bin and list_arg and out_path then
+		local cmd = string.format("%q -type geosite -append=true -input %q -list %q -output %q -lowmem=true",
+			bin, geosite_path, list_arg, out_path)
+		sys.call(cmd)
+		return 0
 	end
+	return 1
 end
 
 if not fs.access(FLAG_PATH) then
@@ -105,9 +114,9 @@ if not fs.access(FLAG_PATH) then
 end
 
 local LOCAL_EXTEND_ARG = ""
-if LOCAL_GROUP == "nil" then
-	LOCAL_GROUP = nil
-	log("  * 注意：国内分组名未设置，可能会导致 DNS 分流错误！")
+if LOCAL_GROUP == "null" or LOCAL_GROUP == "" then
+	log("  * 注意：SmartDNS 国内分组名未设置，DNS 将无法正常工作！！！")
+	os.exit(1)
 else
 	--从smartdns配置中读取参数
 	local custom_conf_path = "/etc/smartdns/custom.conf"
@@ -118,16 +127,29 @@ else
 		{key = "response_mode", config_key = "response-mode", prefix = "-r ", default = "first-ping"},
 		{key = "rr_ttl", config_key = "rr-ttl", prefix = "-rr-ttl "},
 		{key = "rr_ttl_min", config_key = "rr-ttl-min", prefix = "-rr-ttl-min "},
-		{key = "rr_ttl_max", config_key = "rr-ttl-max", prefix = "-rr-ttl-max "}
+		{key = "rr_ttl_max", config_key = "rr-ttl-max", prefix = "-rr-ttl-max "},
+		{key = "rr_ttl_reply_max", config_key = "rr-ttl-reply-max", prefix = "-rr-ttl-reply-max "},
+		{
+			key = "force_aaaa_soa",
+			config_key = "force-qtype-SOA",
+			prefix = "-address ",
+			get_value = function(custom_config)
+				local soa = custom_config["force-qtype-SOA"]
+				return ((soa and soa:match("(^|%s)28(%s|$)"))
+					or custom_config["force-AAAA-SOA"] == "yes"
+					or api.uci_get("smartdns", "@smartdns[0]", "force_aaaa_soa") == "1")
+					and "#6" or "-6"
+			end
+		}
 	}
 	-- 从 custom.conf 中读取值，以最后出现的值为准
 	local custom_config = {}
 	local f_in = io.open(custom_conf_path, "r")
 	if f_in then
 		for line in f_in:lines() do
-			line = line:match("^%s*(.-)%s*$")
+			line = api.trim(line)
 			if line ~= "" and not line:match("^#") then
-				local param, value = line:match("^(%S+)%s+(%S+)$")
+				local param, value = line:match("^(%S+)%s+(.+)$")
 				if param and value then custom_config[param] = value end
 			end
 		end
@@ -135,7 +157,12 @@ else
 	end
 	-- 从 smartdns 配置中读取值，优先级以 custom.conf 为准
 	for _, opt in ipairs(options) do
-		local val = custom_config[opt.config_key] or uci:get("smartdns", "@smartdns[0]", opt.key) or opt.default
+		local val
+		if opt.get_value then
+			val = opt.get_value(custom_config)
+		else
+			val = custom_config[opt.config_key] or api.uci_get("smartdns", "@smartdns[0]", opt.key) or opt.default
+		end
 		if val == "yes" then val = "1" elseif val == "no" then val = "0" end
 		if opt.yes_no then
 			local arg = (val == "1" and opt.arg_yes or opt.arg_no)
@@ -158,47 +185,72 @@ if not REMOTE_GROUP or REMOTE_GROUP == "nil" then
 	sys.call('sed -i "/passwall/d" /etc/smartdns/custom.conf >/dev/null 2>&1')
 end
 
+local force_https_soa = api.uci_get_c("@global[0]", "force_https_soa") or 0
 local proxy_server_name = "passwall-proxy-server"
 config_lines = {
-	"force-qtype-SOA 65",
-	"server 114.114.114.114 -bootstrap-dns",
-	DNS_MODE == "socks" and string.format("proxy-server socks5://%s -name %s", REMOTE_PROXY_SERVER, proxy_server_name) or nil
+	tonumber(LISTEN_PORT) ~= 0 and "bind [::]:" .. LISTEN_PORT .. "@lo" or "",
+	(tonumber(LOCAL_PORT) ~= 0 and LOCAL_GROUP) and "bind [::]:" .. LOCAL_PORT .. "@lo -group " ..  LOCAL_GROUP or "",
+	tonumber(force_https_soa) == 1 and "force-qtype-SOA 65" or "force-qtype-SOA -,65",
+	"server 223.5.5.5 -bootstrap-dns",
+	is_file_nonzero("/etc/hosts") and "hosts-file /etc/hosts" or "",
+	DNS_MODE == "socks" and string.format("proxy-server socks5://%s -name %s", REMOTE_PROXY_SERVER, proxy_server_name) or ""
 }
 if DNS_MODE == "socks" then
-	string.gsub(REMOTE_DNS, '[^' .. "|" .. ']+', function(w)
-		local server_dns = w
-		local server_param = string.format("server %s -group %s -proxy %s", "%s", REMOTE_GROUP, proxy_server_name)
-		server_param = server_param .. " -exclude-default-group"
+	for w in string.gmatch(REMOTE_DNS, '[^|]+') do
+		local server_dns = api.trim(w)
+		local server_param
 
-		local isHTTPS = w:find("https://")
-		if isHTTPS and isHTTPS == 1 then
-			local http_host = nil
-			local url = w
-			local port = 443
-			local s = api.split(w, ",")
-			if s and #s > 1 then
-				url = s[1]
-				local dns_ip = s[2]
-				local host_port = api.get_domain_from_url(s[1])
-				if host_port and #host_port > 0 then
-					http_host = host_port
-					local s2 = api.split(host_port, ":")
-					if s2 and #s2 > 1 then
-						http_host = s2[1]
-						port = s2[2]
-					end 
-					url = url:gsub(http_host, dns_ip)
+		local dnsType = string.match(server_dns, "^(.-)://")
+		dnsType = dnsType and string.lower(dnsType) or nil
+		local dnsServer = string.match(server_dns, "://(.+)") or server_dns
+
+		if dnsType and dnsType ~= "" and dnsType ~= "udp" then
+			if dnsType == "tcp" then
+				server_param = "server-tcp " .. dnsServer
+			elseif dnsType == "tls" then
+				server_param = "server-tls " .. dnsServer
+			elseif dnsType == "quic" then
+				server_param = "server-quic " .. dnsServer
+			elseif dnsType == "https" or dnsType == "h3" then
+				local http_host = nil
+				local url = w
+				local port = 443
+				local s = api.split(w, ",")
+				if s and #s > 1 then
+					url = s[1]
+					local dns_ip = s[2]
+					local host_port = api.get_domain_from_url(s[1])
+					if host_port and #host_port > 0 then
+						http_host = host_port
+						local s2 = api.split(host_port, ":")
+						if s2 and #s2 > 1 then
+							http_host = s2[1]
+							port = s2[2]
+						end 
+						url = url:gsub(http_host, dns_ip)
+					end
 				end
+				server_dns = url
+				if http_host then
+					server_dns = server_dns .. " -http-host " .. http_host
+				end
+				server_param = (dnsType == "https" and "server-https " or "server-h3 ") .. server_dns
 			end
-			server_dns = url
-			if http_host then
-				server_dns = server_dns .. " -http-host " .. http_host
-			end
+		else
+			server_param = "server " .. dnsServer
+
 		end
-		server_param = string.format(server_param, server_dns)
+
+		if not api.is_local_ip(w) then
+			server_param = server_param .. " -proxy " .. proxy_server_name
+		end
+
+		server_param = server_param .. " -group " .. REMOTE_GROUP .. " -exclude-default-group"
+		if SUBNET and SUBNET ~= "" and SUBNET ~= "0" then
+			server_param = server_param .. " -subnet " .. SUBNET
+		end
 		table.insert(config_lines, server_param)
-	end)
-	REMOTE_FAKEDNS = 0
+	end
 else
 	local server_param = string.format("server %s -group %s -exclude-default-group", TUN_DNS:gsub("#", ":"), REMOTE_GROUP)
 	table.insert(config_lines, server_param)
@@ -216,9 +268,7 @@ if DEFAULT_DNS_GROUP then
 	local domain_rules_str = "domain-rules /./ -nameserver " .. DEFAULT_DNS_GROUP
 	if DEFAULT_DNS_GROUP == REMOTE_GROUP then
 		domain_rules_str = domain_rules_str .. " -speed-check-mode none -d no -no-serve-expired"
-		if NO_PROXY_IPV6 == "1" then
-			domain_rules_str = domain_rules_str .. " -address #6"
-		end
+		domain_rules_str = domain_rules_str .. " -address " .. (NO_PROXY_IPV6 == "1" and "#6" or "-6")
 	elseif DEFAULT_DNS_GROUP == LOCAL_GROUP then
 		domain_rules_str = domain_rules_str .. (LOCAL_EXTEND_ARG ~= "" and " " .. LOCAL_EXTEND_ARG or "")
 	end
@@ -238,16 +288,20 @@ local file_block_host = TMP_ACL_PATH .. "/block_host"
 if USE_BLOCK_LIST == "1" and not fs.access(file_block_host) then
 	local block_domain, lookup_block_domain = {}, {}
 	local geosite_arg = ""
-	for line in io.lines(RULES_PATH .. "/block_host") do
-		if not line:find("#") and line:find("geosite:") then
-			line = string.match(line, ":([^:]+)$")
-			geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
-		else
-			line = api.get_std_domain(line)
-			if line ~= "" and not line:find("#") then
-				insert_unique(block_domain, line, lookup_block_domain)
+	local f = io.open(RULES_PATH .. "/block_host")
+	if f then
+		for line in f:lines() do
+			if not line:find("#") and line:find("geosite:") then
+				line = string.match(line, ":([^:]+)$")
+				geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
+			else
+				line = api.get_std_domain(line)
+				if line ~= "" and not line:find("#") then
+					insert_unique(block_domain, line, lookup_block_domain)
+				end
 			end
 		end
+		f:close()
 	end
 	if #block_domain > 0 then
 		local f_out = io.open(file_block_host, "w")
@@ -256,9 +310,12 @@ if USE_BLOCK_LIST == "1" and not fs.access(file_block_host) then
 		end
 		f_out:close()
 	end
-	if USE_GEOVIEW == "1" and geosite_arg ~= "" and api.is_finded("geoview") then
-		get_geosite(geosite_arg, file_block_host)
-		log("  * 解析[屏蔽列表] Geosite 到屏蔽域名表(blocklist)完成")
+	if USE_GEOVIEW == "1" and geosite_arg ~= "" then
+		if get_geosite(geosite_arg, file_block_host) == 0 then
+			log("  - 解析[屏蔽列表] Geosite 到屏蔽域名表(blocklist)完成")
+		else
+			log("  - 解析[屏蔽列表] Geosite 到屏蔽域名表(blocklist)失败！")
+		end
 	end
 end
 if USE_BLOCK_LIST == "1" and is_file_nonzero(file_block_host) then
@@ -275,16 +332,27 @@ local file_vpslist = TMP_ACL_PATH .. "/vpslist"
 if not is_file_nonzero(file_vpslist) then
 	local f_out = io.open(file_vpslist, "w")
 	local written_domains = {}
-	uci:foreach(appname, "nodes", function(t)
-		local function process_address(address)
-			if address == "engage.cloudflareclient.com" then return end
-			if datatypes.hostname(address) and not written_domains[address] then
-				f_out:write(address .. "\n")
-				written_domains[address] = true
-			end
+	local function process_address(address)
+		address = (address or ""):lower()
+		if api.vps_domain_exclude(address) then return end
+		if datatypes.hostname(address) and not written_domains[address] then
+			f_out:write(address .. "\n")
+			written_domains[address] = true
 		end
+	end
+	api.uci_foreach_c("nodes", function(t)
 		process_address(t.address)
 		process_address(t.download_address)
+		local dns, _ = api.get_domain_port_from_url(t.domain_resolver_dns or t.domain_resolver_dns_https or "")
+		if dns and dns ~= "" then
+			process_address(dns)
+		end
+	end)
+	api.uci_foreach_c("subscribe_list", function(t)  --订阅链接
+		local url, _ = api.get_domain_port_from_url(t.url or "")
+		if url and url ~= "" then
+			process_address(url)
+		end
 	end)
 	f_out:close()
 end
@@ -294,8 +362,8 @@ if is_file_nonzero(file_vpslist) then
 		string.format("domain-set -name %s -file %s", domain_set_name, file_vpslist)
 	}
 	local sets = {
-		"#4:" .. setflag .. "passwall_vps",
-		"#6:" .. setflag .. "passwall_vps6"
+		"#4:" .. setflag .. "psw_vps",
+		"#6:" .. setflag .. "psw_vps6"
 	}
 	local domain_rules_str = string.format('domain-rules /domain-set:%s/ %s', domain_set_name, LOCAL_GROUP and "-nameserver " .. LOCAL_GROUP or "")
 	domain_rules_str = domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")
@@ -310,16 +378,20 @@ local file_direct_host = TMP_ACL_PATH .. "/direct_host"
 if USE_DIRECT_LIST == "1" and not fs.access(file_direct_host) then
 	local direct_domain, lookup_direct_domain = {}, {}
 	local geosite_arg = ""
-	for line in io.lines(RULES_PATH .. "/direct_host") do
-		if not line:find("#") and line:find("geosite:") then
-			line = string.match(line, ":([^:]+)$")
-			geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
-		else
-			line = api.get_std_domain(line)
-			if line ~= "" and not line:find("#") then
-				insert_unique(direct_domain, line, lookup_direct_domain)
+	local f = io.open(RULES_PATH .. "/direct_host")
+	if f then
+		for line in f:lines() do
+			if not line:find("#") and line:find("geosite:") then
+				line = string.match(line, ":([^:]+)$")
+				geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
+			else
+				line = api.get_std_domain(line)
+				if line ~= "" and not line:find("#") and not line:find(":") then
+					insert_unique(direct_domain, line, lookup_direct_domain)
+				end
 			end
 		end
+		f:close()
 	end
 	if #direct_domain > 0 then
 		local f_out = io.open(file_direct_host, "w")
@@ -328,9 +400,12 @@ if USE_DIRECT_LIST == "1" and not fs.access(file_direct_host) then
 		end
 		f_out:close()
 	end
-	if USE_GEOVIEW == "1" and geosite_arg ~= "" and api.is_finded("geoview") then
-		get_geosite(geosite_arg, file_direct_host)
-		log("  * 解析[直连列表] Geosite 到域名白名单(whitelist)完成")
+	if USE_GEOVIEW == "1" and geosite_arg ~= "" then
+		if get_geosite(geosite_arg, file_direct_host) == 0 then
+			log("  - 解析[直连列表] Geosite 到域名白名单(whitelist)完成")
+		else
+			log("  - 解析[直连列表] Geosite 到域名白名单(whitelist)失败！")
+		end
 	end
 end
 if USE_DIRECT_LIST == "1" and is_file_nonzero(file_direct_host) then
@@ -339,8 +414,8 @@ if USE_DIRECT_LIST == "1" and is_file_nonzero(file_direct_host) then
 		string.format("domain-set -name %s -file %s", domain_set_name, file_direct_host)
 	}
 	local sets = {
-		"#4:" .. setflag .. "passwall_white",
-		"#6:" .. setflag .. "passwall_white6"
+		"#4:" .. setflag .. "psw_white",
+		"#6:" .. setflag .. "psw_white6"
 	}
 	local domain_rules_str = string.format('domain-rules /domain-set:%s/ %s', domain_set_name, LOCAL_GROUP and "-nameserver " .. LOCAL_GROUP or "")
 	domain_rules_str = domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")
@@ -355,16 +430,20 @@ local file_proxy_host = TMP_ACL_PATH .. "/proxy_host"
 if USE_PROXY_LIST == "1" and not fs.access(file_proxy_host) then
 	local proxy_domain, lookup_proxy_domain = {}, {}
 	local geosite_arg = ""
-	for line in io.lines(RULES_PATH .. "/proxy_host") do
-		if not line:find("#") and line:find("geosite:") then
-			line = string.match(line, ":([^:]+)$")
-			geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
-		else
-			line = api.get_std_domain(line)
-			if line ~= "" and not line:find("#") then
-				insert_unique(proxy_domain, line, lookup_proxy_domain)
+	local f = io.open(RULES_PATH .. "/proxy_host")
+	if f then
+		for line in f:lines() do
+			if not line:find("#") and line:find("geosite:") then
+				line = string.match(line, ":([^:]+)$")
+				geosite_arg = geosite_arg .. (geosite_arg ~= "" and "," or "") .. line
+			else
+				line = api.get_std_domain(line)
+				if line ~= "" and not line:find("#") and not line:find(":") then
+					insert_unique(proxy_domain, line, lookup_proxy_domain)
+				end
 			end
 		end
+		f:close()
 	end
 	if #proxy_domain > 0 then
 		local f_out = io.open(file_proxy_host, "w")
@@ -373,9 +452,12 @@ if USE_PROXY_LIST == "1" and not fs.access(file_proxy_host) then
 		end
 		f_out:close()
 	end
-	if USE_GEOVIEW == "1" and geosite_arg ~= "" and api.is_finded("geoview") then
-		get_geosite(geosite_arg, file_proxy_host)
-		log("  * 解析[代理列表] Geosite 到代理域名表(blacklist)完成")
+	if USE_GEOVIEW == "1" and geosite_arg ~= "" then
+		if get_geosite(geosite_arg, file_proxy_host) == 0 then
+			log("  - 解析[代理列表] Geosite 到代理域名表(blacklist)完成")
+		else
+			log("  - 解析[代理列表] Geosite 到代理域名表(blacklist)失败！")
+		end
 	end
 end
 if USE_PROXY_LIST == "1" and is_file_nonzero(file_proxy_host) then
@@ -387,14 +469,13 @@ if USE_PROXY_LIST == "1" and is_file_nonzero(file_proxy_host) then
 	domain_rules_str = domain_rules_str .. " -speed-check-mode none"
 	domain_rules_str = domain_rules_str .. " -no-serve-expired"
 	local sets = {
-		"#4:" .. setflag .. "passwall_black"
+		"#4:" .. setflag .. "psw_black"
 	}
 	if NO_PROXY_IPV6 == "1" then
-		domain_rules_str = domain_rules_str .. " -address #6"
-		domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+		domain_rules_str = domain_rules_str .. " -address #6 " .. set_type .. " " .. table.concat(sets, ",")
 	else
-		table.insert(sets, "#6:" .. setflag .. "passwall_black6")
-		domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " -d no " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+		table.insert(sets, "#6:" .. setflag .. "psw_black6")
+		domain_rules_str = domain_rules_str .. " -address -6 -d no " .. set_type .. " " .. table.concat(sets, ",")
 	end
 	table.insert(tmp_lines, domain_rules_str)
 	insert_array_after(config_lines, tmp_lines, "#--5")
@@ -411,14 +492,13 @@ if USE_GFW_LIST == "1" and is_file_nonzero(RULES_PATH .. "/gfwlist") then
 	domain_rules_str = domain_rules_str .. " -speed-check-mode none"
 	domain_rules_str = domain_rules_str .. " -no-serve-expired"
 	local sets = {
-		"#4:" .. setflag .. "passwall_gfw"
+		"#4:" .. setflag .. "psw_gfw"
 	}
 	if NO_PROXY_IPV6 == "1" then
-		domain_rules_str = domain_rules_str .. " -address #6"
-		domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+		domain_rules_str = domain_rules_str .. " -address #6 " .. set_type .. " " .. table.concat(sets, ",")
 	else
-		table.insert(sets, "#6:" .. setflag .. "passwall_gfw6")
-		domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " -d no " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+		table.insert(sets, "#6:" .. setflag .. "psw_gfw6")
+		domain_rules_str = domain_rules_str .. " -address -6 -d no " .. set_type .. " " .. table.concat(sets, ",")
 	end
 	table.insert(tmp_lines, domain_rules_str)
 	insert_array_after(config_lines, tmp_lines, "#--1")
@@ -434,8 +514,8 @@ if CHN_LIST ~= "0" and is_file_nonzero(RULES_PATH .. "/chnlist") then
 
 	if CHN_LIST == "direct" then
 		local sets = {
-			"#4:" .. setflag .. "passwall_chn",
-			"#6:" .. setflag .. "passwall_chn6"
+			"#4:" .. setflag .. "psw_chn",
+			"#6:" .. setflag .. "psw_chn6"
 		}
 		local domain_rules_str = string.format('domain-rules /domain-set:%s/ %s', domain_set_name, LOCAL_GROUP and "-nameserver " .. LOCAL_GROUP or "")
 		domain_rules_str = domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")
@@ -451,14 +531,13 @@ if CHN_LIST ~= "0" and is_file_nonzero(RULES_PATH .. "/chnlist") then
 		domain_rules_str = domain_rules_str .. " -speed-check-mode none"
 		domain_rules_str = domain_rules_str .. " -no-serve-expired"
 		local sets = {
-			"#4:" .. setflag .. "passwall_chn"
+			"#4:" .. setflag .. "psw_chn"
 		}
 		if NO_PROXY_IPV6 == "1" then
-			domain_rules_str = domain_rules_str .. " -address #6"
-			domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+			domain_rules_str = domain_rules_str .. " -address #6 " .. set_type .. " " .. table.concat(sets, ",")
 		else
-			table.insert(sets, "#6:" .. setflag .. "passwall_chn6")
-			domain_rules_str = REMOTE_FAKEDNS ~= "1" and (domain_rules_str .. " -d no " .. set_type .. " " .. table.concat(sets, ",")) or domain_rules_str
+			table.insert(sets, "#6:" .. setflag .. "psw_chn6")
+			domain_rules_str = domain_rules_str .. " -address -6 -d no " .. set_type .. " " .. table.concat(sets, ",")
 		end
 		table.insert(tmp_lines, domain_rules_str)
 		insert_array_after(config_lines, tmp_lines, "#--2")
@@ -467,25 +546,25 @@ if CHN_LIST ~= "0" and is_file_nonzero(RULES_PATH .. "/chnlist") then
 end
 
 --分流规则
-if uci:get(appname, TCP_NODE, "protocol") == "_shunt" then
+if IS_SHUNT_NODE then
 	local white_domain, lookup_white_domain = {}, {}
 	local shunt_domain, lookup_shunt_domain = {}, {}
 	local file_white_host = FLAG_PATH .. "/shunt_direct_host"
 	local file_shunt_host = FLAG_PATH .. "/shunt_proxy_host"
 	local geosite_white_arg, geosite_shunt_arg = "", ""
 
-	local t = uci:get_all(appname, TCP_NODE)
+	local t = api.uci_get_c(NODE)
 	local default_node_id = t["default_node"] or "_direct"
-	uci:foreach(appname, "shunt_rules", function(s)
+	api.uci_foreach_c("shunt_rules", function(s)
 		local _node_id = t[s[".name"]]
-		if _node_id and _node_id ~= "_blackhole" then
+		if _node_id and _node_id ~= "_blackhole" and t["shunt_group"] == s.group then
 			if _node_id == "_default" then
 				_node_id = default_node_id
 			end
 
 			local domain_list = s.domain_list or ""
 			for line in string.gmatch(domain_list, "[^\r\n]+") do
-				if line ~= "" and not line:find("#") and not line:find("regexp:") and not line:find("ext:") then
+				if line ~= "" and not line:find("#") and not line:find("regexp:") and not line:find("ext:") and not line:find("rule-set:") and not line:find("rs:") then
 					if line:find("geosite:") then
 						line = string.match(line, ":([^:]+)$")
 						if _node_id == "_direct" then
@@ -535,14 +614,19 @@ if uci:get(appname, TCP_NODE, "protocol") == "_shunt" then
 		end
 	end
 
-	if USE_GFW_LIST == "1" and CHN_LIST == "0" and USE_GEOVIEW == "1" and api.is_finded("geoview") then  --仅GFW模式解析geosite
+	if USE_GFW_LIST == "1" and CHN_LIST == "0" and USE_GEOVIEW == "1" then  --仅GFW模式解析geosite
+		local return_white, return_shunt
 		if geosite_white_arg ~= "" then
-			get_geosite(geosite_white_arg, file_white_host)
+			return_white = get_geosite(geosite_white_arg, file_white_host)
 		end
 		if geosite_shunt_arg ~= "" then
-			get_geosite(geosite_shunt_arg, file_shunt_host)
+			return_shunt = get_geosite(geosite_shunt_arg, file_shunt_host)
 		end
-		log("  * 解析[分流节点] Geosite 完成")
+		if (return_white == nil or return_white == 0) and (return_shunt == nil or return_shunt == 0) then
+			log("  - 解析[分流节点] Geosite 完成")
+		else
+			log("  - 解析[分流节点] Geosite 失败！")
+		end
 	end
 
 	if is_file_nonzero(file_white_host) then
@@ -553,14 +637,14 @@ if uci:get(appname, TCP_NODE, "protocol") == "_shunt" then
 		local domain_rules_str = string.format('domain-rules /domain-set:%s/ %s', domain_set_name, LOCAL_GROUP and "-nameserver " .. LOCAL_GROUP or "")
 		if USE_DIRECT_LIST == "1" then
 			local sets = {
-				"#4:" .. setflag .. "passwall_white",
-				"#6:" .. setflag .. "passwall_white6"
+				"#4:" .. setflag .. "psw_white",
+				"#6:" .. setflag .. "psw_white6"
 			}
 			domain_rules_str = domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")
 		else
 			local sets = {
-				"#4:" .. setflag .. "passwall_shunt",
-				"#6:" .. setflag .. "passwall_shunt6"
+				"#4:" .. setflag .. "psw_shunt",
+				"#6:" .. setflag .. "psw_shunt6"
 			}
 			domain_rules_str = domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ",")
 		end
@@ -578,18 +662,13 @@ if uci:get(appname, TCP_NODE, "protocol") == "_shunt" then
 		domain_rules_str = domain_rules_str .. " -speed-check-mode none"
 		domain_rules_str = domain_rules_str .. " -no-serve-expired"
 		local sets = {
-			"#4:" .. setflag .. "passwall_shunt"
+			"#4:" .. setflag .. "psw_shunt"
 		}
 		if NO_PROXY_IPV6 == "1" then
-			domain_rules_str = domain_rules_str .. " -address #6"
-			domain_rules_str = (not only_global and REMOTE_FAKEDNS == "1")
-					and domain_rules_str
-					or (domain_rules_str .. " " .. set_type .. " " .. table.concat(sets, ","))
+			domain_rules_str = domain_rules_str .. " -address #6 " .. set_type .. " " .. table.concat(sets, ",")
 		else
-			table.insert(sets, "#6:" .. setflag .. "passwall_shunt6")
-			domain_rules_str = (not only_global and REMOTE_FAKEDNS == "1")
-					and domain_rules_str
-					or (domain_rules_str .. " -d no " .. set_type .. " " .. table.concat(sets, ","))
+			table.insert(sets, "#6:" .. setflag .. "psw_shunt6")
+			domain_rules_str = domain_rules_str .. " -address -6 -d no " .. set_type .. " " .. table.concat(sets, ",")
 		end
 		table.insert(tmp_lines, domain_rules_str)
 		insert_array_after(config_lines, tmp_lines, "#--3")
@@ -613,5 +692,5 @@ if DEFAULT_DNS_GROUP then
 end
 
 fs.symlink(TMP_CONF_FILE, SMARTDNS_CONF)
-sys.call(string.format('echo "conf-file %s" >> /etc/smartdns/custom.conf', string.gsub(SMARTDNS_CONF, appname, appname .. "*")))
-log("  - 请让SmartDNS作为Dnsmasq的上游或重定向！")
+sys.call(string.format('echo "conf-file %s" >> /etc/smartdns/custom.conf', string.gsub(SMARTDNS_CONF, "passwall", "passwall*")))
+log("  - SmartDNS已作为Dnsmasq上游，如果你自行配置了错误的DNS流程，将会导致域名(直连/代理域名)分流失效！！！")
