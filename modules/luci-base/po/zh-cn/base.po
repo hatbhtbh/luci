@@ -4144,3 +4144,9 @@ msgstr "弱信号剔除阈值"
 
 msgid "STA Assoc Threshold"
 msgstr "弱信号接入阈值"
+
+msgid "Designated master"
+msgstr "指定主接口"
+
+msgid "Set this interface as master for RA and DHCPv6 relaying as well as NDP proxying."
+msgstr "将此接口设置为 RA、DHCPv6 中继以及 NDP 代理的主接口。"
