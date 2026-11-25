@@ -66,6 +66,6 @@ jobs:
           else
             echo "Changes detected. Committing and pushing..."
             git commit -m "Sync openclash and passwall from upstream"
-            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:master
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:openwrt-23.05
             echo "Commit and push completed."
           fi
