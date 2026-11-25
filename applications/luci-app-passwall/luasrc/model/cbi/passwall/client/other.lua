@@ -68,9 +68,9 @@ o.validate = port_validate
 
 ---- UDP No Redir Ports
 o = s:option(Value, "udp_no_redir_ports", translate("UDP No Redir Ports"),
-			 "<font color='red'>" .. translate(
-				 "Fill in the ports you don't want to be forwarded by the agent, with the highest priority.") ..
-				 "</font>")
+			"<font color='red'>" .. translate(
+				"Fill in the ports you don't want to be forwarded by the agent, with the highest priority.") ..
+				"</font>")
 o.default = "disable"
 o:value("disable", translate("No patterns are used"))
 o:value("1:65535", translate("All"))
@@ -193,7 +193,7 @@ if has_xray then
 	o.default = 0
 	o.description = translate("Override the connection destination address with the sniffed domain.<br />Otherwise use sniffed domain for routing only.<br />If using shunt nodes, configure the domain shunt rules correctly.")
 
-	local domains_excluded = string.format("/usr/share/%s/rules/domains_excluded", m.config)
+	local domains_excluded = string.format("/etc/%s/rules/domains_excluded", m.config)
 	o = s_xray:option(TextValue, "excluded_domains", translate("Excluded Domains"), translate("If the traffic sniffing result is in this list, the destination address will not be overridden."))
 	o.rows = 15
 	o.wrap = "off"
