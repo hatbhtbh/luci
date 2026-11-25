@@ -1,4 +1,4 @@
-name: Sync openclash and passwall 
+name: Sync openclash and passwall (master)
 
 on:
   # schedule:
